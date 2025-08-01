@@ -1,0 +1,1102 @@
+---
+title: Comparison of the precision of predicted dispensation length when using single or multiple index dates and saturated sampling
+author: "SG"
+date: "2025-07-31"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load_libraries, results = "hide"}
+library(wtdr)
+library(bbmle)
+library(haven)
+library(tidyverse)
+library(data.table)
+library(rlang)
+library(boot)
+library(Deriv)
+library(numDeriv)
+```
+
+```{r load_new_functions, echo=FALSE}
+setMethod("predict", "wtd",
+          function(object, prediction.data=NULL, type="dur", iadmean=F, distrx=NULL, quantile=0.8,
+                   se.fit=FALSE, na.action=na.pass, ...) {
+
+      # 07.05.25
+      if(is.null(prediction.data)) {
+
+        datanew <- data.table(as.data.frame(object@data))
+
+      } else {
+
+        datanew <- data.table(as.data.frame(prediction.data))
+
+      }
+
+      distrxnew <- datanew[,get(distrx)]
+      distrx <- distrxnew
+
+      datanew <- na.action(datanew)
+      #
+
+
+            parm_form <- unlist(strsplit(gsub(" ", "", unlist(strsplit(object@formula, ":", fixed=T))[2]), ",", fixed=T))
+
+            # !! parnames e vars are the same (keep only one)
+
+            parnames <- grep("delta", names(object@call$start), value=T, fixed=T, invert=T)
+
+            if (typeof(parm_form)=="character" && length(parm_form)>0) {
+              ## linear model specified for some parameters
+              vars <- sapply(strsplit(parm_form, "~", fixed=T),"[",1)
+              models <-  paste0("~", sapply(strsplit(parm_form, "~", fixed=T),"[",2))
+            } else {parm_form <- c(); vars <- c(); models <- c()}
+
+            for (i in seq(along=parnames)) {
+              if (!(parnames[i] %in% vars)) {
+                vars <- c(vars, parnames[i])
+                models <- c(models, "~1")
+                parm_form <- c(parm_form, paste0(parnames[i], "~1"))
+              }
+            }
+
+            parnames_din <- sapply(strsplit(parm_form, "~"), `[`, 1)
+
+            vpos <- list()
+            for (i in seq(along=parm_form)) {
+              vname <- vars[i]      ## name of variable
+              vpos[[vname]] <- which(parnames_din==vname)
+            }
+
+            if (!is.null(prediction.data)) {
+
+              for (i in seq_along(parnames)) {
+
+                if (length(labels(terms(as.formula(parm_form[i]))))!=0) {
+
+                  if ((sum(!labels(terms(as.formula(parm_form[i]))) %in% names(prediction.data)==T)) >=1) {
+
+                    stop("Covariates used in the estimation are not in the prediction dataset (new data)")
+
+                  }
+
+                }
+
+              }
+            }
+
+
+            # Lognormal distribution
+            if(object@dist=="lnorm") {
+
+              mm1 <- model.matrix(formula(models[vpos[["logitp"]]]), data=datanew)
+              mm2 <- model.matrix(formula(models[vpos[["mu"]]]), data=datanew)
+              mm3 <- model.matrix(formula(models[vpos[["lnsigma"]]]), data=datanew)
+
+              mm_names_1 <- model.frame(formula(models[vpos[["logitp"]]]), data=datanew)
+              mm_names_2 <- model.frame(formula(models[vpos[["mu"]]]), data=datanew)
+              mm_names_3 <- model.frame(formula(models[vpos[["lnsigma"]]]), data=datanew)
+
+
+              check <- which.max(c(dim(mm_names_1)[2], dim(mm_names_2)[2], dim(mm_names_3)[2]))
+              vec <- list(mm_names_1, mm_names_2, mm_names_3)
+              mm_names <- data.frame(vec[check])
+
+
+
+              # design matrix multiplied by estimates
+              est <- list()
+              for (i in seq_along(parnames)) {
+                vname <- parnames[i]      ## name of variable
+                est[[vname]] <- object@coef[grepl(vname, names(object@coef))]
+              }
+
+              # compute parameters (i.e. mu) used to predict duration and probabilities
+              mm <- c("mm1", "mm2", "mm3")
+
+              for (i in seq_along(parnames)) {
+
+                x <- get(mm[i]) %*% matrix(unlist(est[i]))
+                assign(parnames[i], x)
+
+              }
+
+
+              if(type=="dur") {
+
+                  if(!iadmean) {
+
+                    # 23/01/25: implementing delta formula to estimate uncertainty
+
+                    parnames_mu <- grep("mu", names(object@coef), value=T, fixed=F, invert=F)
+
+                    parnames_mu <- gsub("\\(|\\)", "", parnames_mu)
+
+                    # constructing part of the expression related to mu
+
+                    expr_mu <- NULL
+
+                    for (i in seq_along(parnames_mu)) {
+
+                      addendo <- bquote(mm2[,.(i)] * .(as.name(parnames_mu[i])))
+
+                      if (is.null(expr_mu)) {
+
+                        expr_mu <- addendo
+
+                      } else {
+
+                        expr_mu <- bquote(.(expr_mu) + .(addendo))
+
+                      }
+
+                    }
+
+                    parnames_lnsigma <- grep("lnsigma", names(object@coef), value=T, fixed=F, invert=F)
+
+                    parnames_lnsigma <- gsub("\\(|\\)", "", parnames_lnsigma)
+
+                    # constructing part of the expression related to lnsigma
+
+                    expr_addend_lnsigma <- NULL
+
+                    for (i in seq_along(parnames_lnsigma)) {
+
+                      addendo <- bquote(mm3[,.(i)] * .(as.name(parnames_lnsigma[i])))
+
+                      if (is.null(expr_addend_lnsigma)) {
+
+                        expr_addend_lnsigma <- addendo
+
+                      } else {
+
+                        expr_addend_lnsigma <- bquote(.(expr_addend_lnsigma) + .(addendo))
+
+                      }
+
+                    }
+
+                    expr_lnsigma <- bquote(quant*exp(.(expr_addend_lnsigma)))
+
+                    dur <- bquote(exp(.(expr_mu) + .(expr_lnsigma)) )
+
+
+                    # function to compute partial derivatives
+
+                    compute_deriv <- function(param) {
+
+                      deriv <- Deriv(dur, param)
+                      values <- as.list(setNames(object@coef, gsub("\\(|\\)", "", names(object@coef)) ))
+                      values$quant <- qnorm(quantile)
+
+                      unique(eval(deriv, values))
+
+                    }
+
+                    # apply the function to compute partial derivatives to the formula mu-part
+
+                    deriv_mu <- lapply(parnames_mu, compute_deriv)
+                    names(deriv_mu) <- parnames_mu
+
+                    max_len <- max(sapply(deriv_mu, length))
+
+                    force_length <- function(vec, target_length) {
+                      c(vec, rep(0, target_length - length(vec)))
+                    }
+
+                    deriv_mu <- lapply(deriv_mu, force_length, target_length = max_len)
+
+
+                    # apply the function to compute partial derivatives to the formula lnsigma-part
+
+                    deriv_lnsigma <- lapply(parnames_lnsigma, compute_deriv)
+                    names(deriv_lnsigma) <- parnames_lnsigma
+
+                    max_len <- max(sapply(deriv_lnsigma, length))
+
+                    force_length <- function(vec, target_length) {
+                      c(vec, rep(0, target_length - length(vec)))
+                    }
+
+                    deriv_lnsigma <- lapply(deriv_lnsigma, force_length, target_length = max_len)
+
+                    deriv_mu_m <- matrix(unlist(deriv_mu), ncol = max_len, byrow = T)
+                    deriv_lnsigma_m <- matrix(unlist(deriv_lnsigma), ncol = max_len, byrow = T)
+
+                    dpart_m <- rbind(deriv_mu_m, deriv_lnsigma_m)
+
+
+                    out <- vector()
+
+                    for  (i in 1:ncol(dpart_m)) {
+
+                      dpart <- matrix(dpart_m[,i], nrow = 1)
+
+                      varcov <- object@vcov
+
+                      selection <- grep("^(mu|lnsigma)", rownames(varcov))
+
+                      cov_dur <- dpart %*% varcov[selection, selection] %*% t(dpart)
+
+                      se_dur <- as.vector(sqrt(cov_dur))
+
+
+                      values <- as.list(setNames(object@coef, gsub("\\(|\\)", "", names(object@coef)) ))
+                      values$quant <- qnorm(quantile)
+
+                      dur_num <- unique(eval(dur, values))
+                      dur_num_v <- eval(dur, values)
+
+                      z <- round(dur_num/se_dur,7)
+
+                      p_value <- 2*pnorm(z, lower.tail = F)
+
+                      dur_ci_lower <- round(dur_num-qnorm(0.975)*se_dur,7)
+                      dur_ci_upper <- round(dur_num+qnorm(0.975)*se_dur,7)
+
+
+                      # tmp <- data.frame(variable = as.character(unique(mm_names_2)[i,]), duration = round(dur_num,7)[i], CI95 = dur_ci[i], SE = round(se_dur,7), z = round(dur_num/se_dur,7)[i])
+
+                      # S4 object as output
+                      tmp <- data.frame(variable = unique(mm_names)[i,], Estimate = round(dur_num,7)[i], SE = round(se_dur,7), z = z[i], p_value = p_value[i], Lower.95= dur_ci_lower[i], Upper.95= dur_ci_upper[i], row.names = NULL)
+
+                      # list as output
+                      # tmp <- list(Estimate = round(dur_num_v,7), SE = round(se_dur,7))#, z = z[i], p_value = p_value[i], Lower.95= dur_ci_lower[i], Upper.95= dur_ci_upper[i])
+
+                      # vector as output
+                      # tmp <- round(dur_num_v,7)
+
+                      # tmp <- setNames(tmp, replace(names(tmp), names(tmp) %in% c("SE", "z", "p_value"), c("Std. Error", "z value", "Pr(z)")) )
+
+                      # out <- tmp
+                      out <- rbind(out, tmp)
+
+                      # if(!se.fit) {
+                      #
+                      #   out <- dur_num_v
+                      #
+                      # } else {
+                      #
+                      #   # out <- rbind(out, tmp)
+                      #   out <- tmp
+                      #
+                      # }
+
+
+                     }
+
+
+                  } else {
+
+                    out <- exp(mu + .5 * exp(lnsigma)^2)
+
+                  }
+
+              } else if(type=="prob") {
+
+                out <- pnorm(-(log(distrx)-mu)/exp(lnsigma))
+              }
+
+              # Weibull distribution
+
+            } else if(object@dist=="weib") {
+
+                mm1 <- model.matrix(formula(models[vpos[["logitp"]]]), data=datanew)
+                mm2 <- model.matrix(formula(models[vpos[["lnalpha"]]]), data=datanew)
+                mm3 <- model.matrix(formula(models[vpos[["lnbeta"]]]), data=datanew)
+
+                mm_names_1 <- model.frame(formula(models[vpos[["logitp"]]]), data=datanew)
+                mm_names_2 <- model.frame(formula(models[vpos[["lnalpha"]]]), data=datanew)
+                mm_names_3 <- model.frame(formula(models[vpos[["lnbeta"]]]), data=datanew)
+
+                check <- which.max(c(dim(mm_names_1)[2], dim(mm_names_2)[2], dim(mm_names_3)[2]))
+                vec <- list(mm_names_1, mm_names_2, mm_names_3)
+                mm_names <- data.frame(vec[check])
+
+                if (!is.null(prediction.data)) {
+
+                for (i in seq_along(parnames)) {
+
+                  if (length(labels(terms(as.formula(parm_form[i]))))!=0) {
+
+                    if ((sum(!labels(terms(as.formula(parm_form[i]))) %in% names(prediction.data)==T)) >=1) {
+
+                      stop("Covariates used in the estimation are not in the prediction dataset (new data)")
+
+                    }
+
+                  }
+
+                }
+
+              }
+
+              # design matrix multiplied by estimates
+              est <- list()
+              for (i in seq_along(parnames)) {
+                vname <- parnames[i]      ## name of variable
+                est[[vname]] <- object@coef[grepl(vname, names(object@coef))]
+              }
+
+              # compute parameters (i.e. mu) used to predict duration and probabilities
+              mm <- c("mm1", "mm2", "mm3")
+
+              for (i in seq_along(parnames)) {
+
+                x <- get(mm[i]) %*% matrix(unlist(est[i]))
+                assign(parnames[i], x)
+
+              }
+
+
+              if(type=="dur") {
+
+
+                  if(!iadmean) {
+
+                    # 11/03/25: implementing delta formula to estimate uncertainty
+
+                    parnames_lnalpha <- grep("lnalpha", names(object@coef), value=T, fixed=F, invert=F)
+
+                    parnames_lnalpha <- gsub("\\(|\\)", "", parnames_lnalpha)
+
+                    # constructing part of the expression related to lnalpha
+
+                    expr_lnalpha <- NULL
+
+                    for (i in seq_along(parnames_lnalpha)) {
+
+                      addendo <- bquote(mm2[,.(i)] * .(as.name(parnames_lnalpha[i])))
+
+                      if (is.null(expr_lnalpha)) {
+
+                        expr_lnalpha <- addendo
+
+                      } else {
+
+                        expr_lnalpha <- bquote(.(expr_lnalpha) + .(addendo))
+
+                      }
+
+                    }
+
+                    parnames_lnbeta <- grep("lnbeta", names(object@coef), value=T, fixed=F, invert=F)
+
+                    parnames_lnbeta <- gsub("\\(|\\)", "", parnames_lnbeta)
+
+                    # constructing part of the expression related to lnbeta
+
+                    expr_lnbeta <- NULL
+
+                    for (i in seq_along(parnames_lnbeta)) {
+
+                      addendo <- bquote(mm3[,.(i)] * .(as.name(parnames_lnbeta[i])))
+
+                      if (is.null(expr_lnbeta)) {
+
+                        expr_lnbeta <- addendo
+
+                      } else {
+
+                        expr_lnbeta <- bquote(.(expr_lnbeta) + .(addendo))
+
+                      }
+
+                    }
+
+                    dur <- bquote( (-log(1-quant))^(1/exp(.(expr_lnalpha)))/exp(.(expr_lnbeta)))
+
+
+                    # function to compute partial derivatives
+
+                    compute_deriv <- function(param) {
+
+                      deriv <- Deriv(dur, param)
+                      values <- as.list(setNames(object@coef, gsub("\\(|\\)", "", names(object@coef)) ))
+                      values$quant <- quantile
+
+                      unique(eval(deriv, values))
+
+                    }
+
+                    # apply the function to compute partial derivatives to the formula lnalpha-part
+
+                    deriv_lnalpha <- lapply(parnames_lnalpha, compute_deriv)
+                    names(deriv_lnalpha) <- parnames_lnalpha
+
+                    max_len <- max(sapply(deriv_lnalpha, length))
+
+                    force_length <- function(vec, target_length) {
+                      c(vec, rep(0, target_length - length(vec)))
+                    }
+
+                    deriv_lnalpha <- lapply(deriv_lnalpha, force_length, target_length = max_len)
+
+
+                    # apply the function to compute partial derivatives to the formula lnbeta-part
+
+                    deriv_lnbeta <- lapply(parnames_lnbeta, compute_deriv)
+                    names(deriv_lnbeta) <- parnames_lnbeta
+
+                    max_len <- max(sapply(deriv_lnbeta, length))
+
+                    force_length <- function(vec, target_length) {
+                      c(vec, rep(0, target_length - length(vec)))
+                    }
+
+                    deriv_lnbeta <- lapply(deriv_lnbeta, force_length, target_length = max_len)
+
+                    deriv_lnalpha_m <- matrix(unlist(deriv_lnalpha), ncol = max_len, byrow = T)
+                    deriv_lnbeta_m <- matrix(unlist(deriv_lnbeta), ncol = max_len, byrow = T)
+
+                    dpart_m <- rbind(deriv_lnalpha_m, deriv_lnbeta_m)
+
+
+
+                    out <- vector()
+
+                    for  (i in 1:ncol(dpart_m)) {
+
+                      dpart <- matrix(dpart_m[,i], nrow = 1)
+
+                      varcov <- object@vcov
+
+                      selection <- grep("^(lnalpha|lnbeta)", rownames(varcov))
+
+                      cov_dur <- dpart %*% varcov[selection, selection] %*% t(dpart)
+
+                      se_dur <- as.vector(sqrt(cov_dur))
+
+
+                      values <- as.list(setNames(object@coef, gsub("\\(|\\)", "", names(object@coef)) ))
+                      values$quant <- quantile
+
+
+                      dur_num <- unique(eval(dur, values))
+                      dur_num_v <- eval(dur, values)
+
+                      z <- round(dur_num/se_dur,7)
+
+                      p_value <- 2*pnorm(z, lower.tail = F)
+
+                      dur_ci_lower <- round(dur_num-qnorm(0.975)*se_dur,7)
+                      dur_ci_upper <- round(dur_num+qnorm(0.975)*se_dur,7)
+
+                      # tmp <- data.frame(variable = as.character(unique(mm_names_2)[i,]), duration = round(dur_num,7)[i], CI95 = dur_ci[i], SE = round(se_dur,7), z = round(dur_num/se_dur,7)[i])
+
+                      # tmp <- data.frame(variable = unique(mm_names)[i,], Estimate = round(dur_num,7)[i], SE = round(se_dur,7), z = z[i], p_value = p_value[i], Lower.95= dur_ci_lower[i], Upper.95= dur_ci_upper[i], row.names = NULL)
+                      # tmp <- setNames(tmp, replace(names(tmp), names(tmp) %in% c("SE", "z", "p_value"), c("Std. Error", "z value", "Pr(z)")) )
+                      #
+                      # out <- rbind(out, tmp)
+
+                      # vector as output
+                      tmp <- round(dur_num_v,7)
+
+                      out <- tmp
+
+                    }
+
+                  } else  {
+
+                    out <-  exp(-lnbeta)^exp(-lnalpha) * exp(lgamma(1 + exp(- lnalpha)))
+
+                  }
+
+              } else if(type=="prob") {
+
+                lnalpha <- object@fullcoef[2]
+                lnbeta <- object@fullcoef[3]
+                ### lnalpha is the shape on the log-scale (lnalpha = 0 is exponential)
+                # out <- pweibull(-((distrx*exp(lnbeta))^exp(lnalpha)), shape = lnalpha)
+                out <- exp(-((distrx*exp(lnbeta))^exp(lnalpha)))
+              }
+
+              # Exponential distribution
+            } else if(object@dist=="exp") {
+
+                mm1 <- model.matrix(formula(models[vpos[["logitp"]]]), data=datanew)
+                mm2 <- model.matrix(formula(models[vpos[["lnbeta"]]]), data=datanew)
+
+                mm_names_1 <- model.frame(formula(models[vpos[["logitp"]]]), data=datanew)
+                mm_names_2 <- model.frame(formula(models[vpos[["lnbeta"]]]), data=datanew)
+
+                check <- which.max(c(dim(mm_names_1)[2], dim(mm_names_2)[2]))
+                vec <- list(mm_names_1, mm_names_2)
+                mm_names <- data.frame(vec[check])
+
+                if (!is.null(prediction.data)) {
+
+                for (i in seq_along(parnames)) {
+
+                  if (length(labels(terms(as.formula(parm_form[i]))))!=0) {
+
+                    if ((sum(!labels(terms(as.formula(parm_form[i]))) %in% names(prediction.data)==T)) >=1) {
+
+                      stop("Covariates used in the estimation are not in the prediction dataset (new data)")
+
+                    }
+
+                  }
+
+                }
+
+              }
+
+              # design matrix multiplied by estimates
+              est <- list()
+              for (i in seq_along(parnames)) {
+                vname <- parnames[i]      ## name of variable
+                est[[vname]] <- object@coef[grepl(vname, names(object@coef))]
+              }
+
+              # compute parameters (i.e. mu) used to predict duration and probabilities
+              mm <- c("mm1", "mm2")
+
+              for (i in seq_along(parnames)) {
+
+                x <- get(mm[i]) %*% matrix(unlist(est[i]))
+                assign(parnames[i], x)
+
+              }
+
+              if(type=="dur") {
+
+                  if(!iadmean) {
+
+                    # out <- (-log(1-quantile))/exp(lnbeta)
+                    # out <- cbind(out, mm_names)
+
+                    # 11/03/25: implementing delta formula to estimate uncertainty
+
+                    parnames_lnbeta <- grep("lnbeta", names(object@coef), value=T, fixed=F, invert=F)
+
+                    parnames_lnbeta <- gsub("\\(|\\)", "", parnames_lnbeta)
+
+                    # constructing part of the expression related to lnbeta
+
+                    expr_lnbeta <- NULL
+
+                    for (i in seq_along(parnames_lnbeta)) {
+
+                      addendo <- bquote(mm2[,.(i)] * .(as.name(parnames_lnbeta[i])))
+
+                      if (is.null(expr_lnbeta)) {
+
+                        expr_lnbeta <- addendo
+
+                      } else {
+
+                        expr_lnbeta <- bquote(.(expr_lnbeta) + .(addendo))
+
+                      }
+
+                    }
+
+                    dur <- bquote( (-log(1-quant))/exp(.(expr_lnbeta)))
+
+
+                    # function to compute partial derivatives
+
+                    compute_deriv <- function(param) {
+
+                      deriv <- Deriv(dur, param)
+                      values <- as.list(setNames(object@coef, gsub("\\(|\\)", "", names(object@coef)) ))
+                      values$quant <- quantile
+
+                      unique(eval(deriv, values))
+
+                    }
+
+
+                    # apply the function to compute partial derivatives to the formula lnbeta-part
+
+                    deriv_lnbeta <- lapply(parnames_lnbeta, compute_deriv)
+                    names(deriv_lnbeta) <- parnames_lnbeta
+
+                    max_len <- max(sapply(deriv_lnbeta, length))
+
+                    force_length <- function(vec, target_length) {
+                      c(vec, rep(0, target_length - length(vec)))
+                    }
+
+                    deriv_lnbeta <- lapply(deriv_lnbeta, force_length, target_length = max_len)
+
+                    deriv_lnbeta_m <- matrix(unlist(deriv_lnbeta), ncol = max_len, byrow = T)
+
+                    dpart_m <- deriv_lnbeta_m
+
+
+
+                    out <- vector()
+
+                    for  (i in 1:ncol(dpart_m)) {
+
+                      dpart <- matrix(dpart_m[,i], nrow = 1)
+
+                      varcov <- object@vcov
+
+                      selection <- grep("^(lnbeta)", rownames(varcov))
+
+                      cov_dur <- dpart %*% varcov[selection, selection] %*% t(dpart)
+
+                      se_dur <- as.vector(sqrt(cov_dur))
+
+                      values <- as.list(setNames(object@coef, gsub("\\(|\\)", "", names(object@coef)) ))
+                      values$quant <- quantile
+
+                      dur_num <- unique(eval(dur, values))
+                      dur_num_v <- eval(dur, values)
+
+                      z <- round(dur_num/se_dur,7)
+
+                      p_value <- 2*pnorm(z, lower.tail = F)
+
+                      dur_ci_lower <- round(dur_num-qnorm(0.975)*se_dur,7)
+                      dur_ci_upper <- round(dur_num+qnorm(0.975)*se_dur,7)
+
+                      # tmp <- data.frame(variable = as.character(unique(mm_names_2)[i,]), duration = round(dur_num,7)[i], CI95 = dur_ci[i], SE = round(se_dur,7), z = round(dur_num/se_dur,7)[i])
+
+                      # tmp <- data.frame(variable = unique(mm_names)[i,], Estimate = round(dur_num,7)[i], SE = round(se_dur,7), z = z[i], p_value = p_value[i], Lower.95= dur_ci_lower[i], Upper.95= dur_ci_upper[i], row.names = NULL)
+                      # tmp <- setNames(tmp, replace(names(tmp), names(tmp) %in% c("SE", "z", "p_value"), c("Std. Error", "z value", "Pr(z)")) )
+                      #
+                      # out <- rbind(out, tmp)
+
+                      # vector as output
+                      tmp <- round(dur_num_v,7)
+
+                      out <- tmp
+
+                    }
+
+                  } else {
+
+                    out <- exp(-lnbeta)
+
+                  }
+
+              } else if(type=="prob") {
+
+                out <- exp(-exp(lnbeta)*distrx)
+              }
+
+            }
+
+            if(type=="dur") {
+
+              # return(unique(out))
+              return(out)
+
+            } else if(type=="prob") {
+
+              return(out)
+
+            }
+
+
+
+
+          })
+
+
+satwtdttt <- function(data, form, parameters=NULL, start=NA, end=NA, reverse=F, id=NA,
+                      subset=NULL, robust=T, na.action=na.omit, init=NULL, ...) {
+  
+  # browser()
+  
+  
+  if(is.null(data) || (nrow(data)<1)) {
+    stop("data must be non-empty")
+  }
+  
+  if(!inherits(form, "formula") || attr(terms(form), "response")==0) {
+    stop("obstime variable must be specified in model formula")
+  }
+  
+  data <- as.data.table(data)
+  
+  if(!is.null(substitute(subset))) {
+    
+    rows <- enquo(subset)
+    rows_val <- eval_tidy(rows, data)
+    data <- data[rows_val ,]
+    
+    if(nrow(data)<1) {
+      stop("data must be non-empty")
+    }
+    
+  }
+  
+  
+  obs.name <- all.vars(form)[1]
+  covar.names <- unique(unlist(lapply(parameters, function(x) all.vars(x)[-1])))
+  
+  if(!(obs.name %in% names(data))) {
+    stop(paste0("'", obs.name, "'", "is not in data"))
+  }
+  
+  data <- na.action(data, cols = c(obs.name, covar.names))
+  
+  
+  # creation of shifted dates
+  
+  # if(!is(data[[obs.name]], "Date") || !is(start, "Date") || !is(end, "Date"))
+  #   stop(paste0("variables start, end and '", obs.name, "' must be all of class Date"))
+  
+  delta <- as.numeric(end - start)
+  
+  if(is.null(id) || length(id)!=1 || is.na(id)) {
+    stop("The id variable must be provided")
+  }
+  
+  if(!(id %in% names(data))) {
+    stop(paste0("'", id, "'", "is not in data"))
+  }
+  
+  
+  # implementing saturated sampling
+  
+  # keep only unique dispensing times
+  data <- data[, .SD[!duplicated(obs.name)], by = id]
+  
+  # add an artificial last observation to include index dates after the last observed dispensation until the end of the window
+  data_max <- data[!duplicated(get(id)),]
+  data_max <- data_max[,obs_max := end]
+  
+  data_max <- data_max[,(obs.name):=NULL]
+  setnames(data_max, "obs_max", obs.name)
+  
+  data_m <- rbind(data, data_max)
+  
+  # order by dispensing time
+  data_m <- data_m[order(get(id), get(obs.name)), ]
+  
+  data_m <- data_m[, tag := fifelse(get(obs.name) < start, 0L, 1L)]
+  
+  data_m <- data_m[, .SD[(get(obs.name)<=end) & (tag==1 | (tag==0 & get(obs.name)==max(get(obs.name)[tag==0], na.rm = T ))) ], by = id]
+  
+  # compute time from consecutive dispensations
+  # data_m <- data_m[, dist_last := shift(get(obs.name), type = "lead") - get(obs.name) , by = id]
+  data_m <- data_m[, dist_last := get(obs.name) - shift(get(obs.name), type = "lag") , by = id]
+  # data_m <- data_m[, time_to_next := as.numeric(time_to_next)]
+  data_m <- data_m[, dist_last := as.numeric(dist_last)]
+  
+  # remove the last row as it doesn't have time to the next one
+  data_m <- data_m[!is.na(dist_last)]
+  
+  # browser()
+  
+  # expand obs.name dist_last times
+  data_e <- data_m[rep(1:.N, times = dist_last)]
+  
+  # compute time since last dispensation, considering all the possible index dates until the next dispensation
+  bycols <- c(id, obs.name)
+  data_e <- data_e[, days_since_last := (seq(.N)-1)+0.5, by = bycols]
+  
+  # browser()
+  
+  # remove index dates before start
+  data_e <- data_e[(get(obs.name) - dist_last + days_since_last) >= as.Date('2014-01-01') ,]
+  # if dist_last := shift(get(obs.name), type = "lead") - get(obs.name)
+  # data_e <- data_e[(get(obs.name) + days_since_last) >= as.Date('2014-01-01') ,]
+  
+  # remove days since last larger than the sampling window
+  data_e <- data_e[days_since_last < 365.25 ,]
+  
+  
+  
+  ############
+  
+  # XXXX do formula rewrite like in wtdttt() ?
+  disttmp <- attr(terms(form, specials=c("dlnorm", "dweib", "dexp")), "specials")
+  
+  dist <- if(isTRUE(disttmp$dlnorm==2)) "lnorm" # need isTRUE() as value can be NULL
+  else if(isTRUE(disttmp$dweib==2)) "weib"
+  else if(isTRUE(disttmp$dexp==2)) "exp"
+  else stop("model must use one of dlnorm, dweib or dexp")
+  
+  if(dist == "lnorm") {
+    
+    newform <- days_since_last ~ dlnorm(logitp, mu, lnsigma)
+    
+  } else if (dist == "weib") {
+    
+    newform <- days_since_last ~ dweib(logitp, lnalpha, lnbeta)
+    
+  } else if (dist == "exp") {
+    
+    newform <- days_since_last ~ dexp(logitp, lnbeta)
+    
+  }
+  
+  if(nrow(data_e)==0)
+    stop("All dates are out of the window defined by start and end")
+  
+  # start and end need to be different compared to those provided in the call of the function (which define the sampling window)
+  # they also need to be numerical now, as days_since_last is numerical
+  start <- 0
+  end <- 365
+  
+  out <- wtdttt(form = newform, parameters = parameters,
+                start = start, end = end, reverse = reverse, id = id,
+                preprocess = F, init = init, data = data_e)
+  
+  
+  if (!robust) {
+    
+    out <- out
+    
+  } else {
+    
+    vcov_s <- sand_vcov(out)
+    out@vcov <- vcov_s
+    
+  }
+  
+  
+  return(out)
+  
+  
+}
+
+
+sand_vcov <- function(fit) {
+  # parse model formula components
+  parm_form <- unlist(strsplit(gsub(" ", "", unlist(strsplit(fit@formula, ":", fixed=T))[2]), ",", fixed=T))
+
+#####
+# based on code from bbmle::calc_mle2_function
+# FIXME: redo without special case code for each density type
+# FIXME: redo to handle non-standard parameter naming
+
+  parnames <- grep("delta", names(fit@call$start), value=T, fixed=T, invert=T)
+
+  if (typeof(parm_form)=="character" && length(parm_form)>0) {
+    ## linear model specified for some parameters
+    vars <- sapply(strsplit(parm_form, "~", fixed=T),"[",1)
+    models <-  paste0("~", sapply(strsplit(parm_form, "~", fixed=T),"[",2))
+  } else {parm_form <- c(); vars <- c(); models <- c()}
+
+  # FIXME for any missing components, substitute "~1"
+
+    for (i in seq(along=parnames)) {
+      if (!(parnames[i] %in% vars)) {
+        vars <- c(vars, parnames[i])
+        models <- c(models, "~1")
+        parm_form <- c(parm_form, paste0(parnames[i], "~1"))
+      }
+    }
+
+    vpos <- list()
+    for (i in seq(along=parm_form)) {
+      vname <- vars[i]      ## name of variable
+      vpos[[vname]] <- i
+    }
+
+    
+    # browser()
+
+    if(fit@dist=="lnorm") {
+
+      mm1 <- model.matrix(formula(models[vpos[["logitp"]]]), data=as.data.frame(fit@data), drop=F)
+      mm2 <- model.matrix(formula(models[vpos[["mu"]]]), data=as.data.frame(fit@data), drop=F)
+      mm3 <- model.matrix(formula(models[vpos[["lnsigma"]]]), data=as.data.frame(fit@data), drop=F)
+
+      myenv <- new.env()
+      myenv$logitp <- mm1 %*% fit@coef[1:ncol(mm1)]
+      myenv$mu <- mm2 %*% fit@coef[(ncol(mm1)+1):(ncol(mm1)+ncol(mm2))]
+      myenv$lnsigma <- mm3%*% fit@coef[(ncol(mm1)+ncol(mm2)+1):(ncol(mm1)+ncol(mm2)+ncol(mm3))]
+      myenv$x <- as.numeric(getElement(fit@data, fit@depvar))
+
+      rm(mm1, mm2, mm3)
+      
+      fun_logitp <- function(logitp) {
+        
+        dlnorm(myenv$x, logitp, myenv$mu, myenv$lnsigma, delta = fit@delta, log=T)
+        
+      }
+      
+      fun_mu <- function(mu) {
+        
+        dlnorm(myenv$x, myenv$logitp, mu, myenv$lnsigma, delta = fit@delta, log=T)
+        
+      }
+      
+      fun_lnsigma <- function(lnsigma) {
+        
+        dlnorm(myenv$x, myenv$logitp, myenv$mu, lnsigma, delta = fit@delta, log=T)
+        
+      }
+      
+      
+      sc1 <- numDeriv::grad(fun_logitp, myenv$logitp)
+      sc2 <- numDeriv::grad(fun_mu, myenv$mu)
+      sc3 <- numDeriv::grad(fun_lnsigma, myenv$lnsigma)
+      
+      mm1 <- model.matrix(formula(models[vpos[["logitp"]]]), data=as.data.frame(fit@data), drop=F)
+      mm2 <- model.matrix(formula(models[vpos[["mu"]]]), data=as.data.frame(fit@data), drop=F)
+      mm3 <- model.matrix(formula(models[vpos[["lnsigma"]]]), data=as.data.frame(fit@data), drop=F)
+      
+      score_mat <- cbind(mm1 * sc1, mm2 * sc2, mm3 * sc3)
+
+    } else if(fit@dist=="weib") {
+
+      mm1 <- model.matrix(formula(models[vpos[["logitp"]]]), data=as.data.frame(fit@data), drop=F)
+      mm2 <- model.matrix(formula(models[vpos[["lnalpha"]]]), data=as.data.frame(fit@data), drop=F)
+      mm3 <- model.matrix(formula(models[vpos[["lnbeta"]]]), data=as.data.frame(fit@data), drop=F)
+
+      myenv <- new.env()
+      myenv$logitp <- mm1 %*% fit@coef[1:ncol(mm1)]
+      myenv$lnalpha <- mm2 %*% fit@coef[(ncol(mm1)+1):(ncol(mm1)+ncol(mm2))]
+      myenv$lnbeta <- mm3%*% fit@coef[(ncol(mm1)+ncol(mm2)+1):(ncol(mm1)+ncol(mm2)+ncol(mm3))]
+      myenv$x <- as.numeric(getElement(fit@data, fit@depvar))
+
+      sc1 <- diag(attr(numericDeriv(
+        quote(dweib(x, logitp, lnalpha, lnbeta, delta = fit@delta, log=T)), c("logitp"), myenv), "gradient"))
+      sc2 <- diag(attr(numericDeriv(
+        quote(dweib(x, logitp, lnalpha, lnbeta, delta = fit@delta, log=T)), c("lnalpha"), myenv), "gradient"))
+      sc3 <- diag(attr(numericDeriv(
+        quote(dweib(x, logitp, lnalpha, lnbeta, delta = fit@delta, log=T)), c("lnbeta"), myenv), "gradient"))
+
+      score_mat <- cbind(mm1 * sc1, mm2 * sc2, mm3 * sc3)
+
+    } else if(fit@dist=="exp") {
+
+      mm1 <- model.matrix(formula(models[vpos[["logitp"]]]), data=as.data.frame(fit@data), drop=F)
+      mm2 <- model.matrix(formula(models[vpos[["lnbeta"]]]), data=as.data.frame(fit@data), drop=F)
+
+      myenv <- new.env()
+      myenv$logitp <- mm1 %*% fit@coef[1:ncol(mm1)]
+      myenv$lnbeta <- mm2 %*% fit@coef[(ncol(mm1)+1):(ncol(mm1)+ncol(mm2))]
+      myenv$x <- as.numeric(getElement(fit@data, fit@depvar))
+
+      sc1 <- diag(attr(numericDeriv(
+        quote(dexp(x, logitp, lnbeta, delta = fit@delta, log=T)), c("logitp"), myenv), "gradient"))
+      sc2 <- diag(attr(numericDeriv(
+        quote(dexp(x, logitp, lnbeta, delta = fit@delta, log=T)), c("lnbeta"), myenv), "gradient"))
+
+      score_mat <- cbind(mm1 * sc1, mm2 * sc2)
+
+    }
+
+  colnames(score_mat) <- names(fit@coef)
+
+  bread <- fit@vcov
+
+  applyTapplySum <- function(X,index) apply(X, 2, function(col) tapply(col, index, sum))
+
+  psi <- applyTapplySum(as.matrix(score_mat), getElement(fit@data, fit@idvar)) # sum by cluster
+
+  meat <- crossprod(as.matrix(psi))
+
+  rownames(meat) <- colnames(meat) <- colnames(psi)
+
+  nid <- NROW(unique(getElement(fit@data, fit@idvar)))
+
+  (nid/(nid-1)) * (bread %*% meat %*% bread)
+}
+
+```
+
+```{r load_data, results = "hide"}
+set.seed(345)
+
+df <- read.csv(file.path("..", "extdata", "df_sat_ex.csv"))
+
+df <- as.data.table(df)
+
+df <- df[, X:=NULL]
+df <- df[, rxdate:=as.Date(rxdate)]
+
+
+# id_sel <- sample(1:15000, 50) # filter df to 50 individuals
+# df_sel <- df[df$pid %in% id_sel ,]
+```
+
+```{r fit_1_model}
+# 1) single index date - forward
+forw_1 <- wtdttt(data = df,
+                 rxdate ~ dlnorm(logitp, mu, lnsigma),
+                 id = "pid",
+                 start = as.Date('2014-01-01'), 
+                 end = as.Date('2014-12-31'), 
+                 reverse = F
+)
+
+summary(forw_1)
+
+predict(forw_1, distrx = "rxdate", quantile = 0.8)
+```
+
+```{r fit_2_model}
+# 2) single index date - reverse
+rev_1 <- wtdttt(data = df,
+                rxdate ~ dlnorm(logitp, mu, lnsigma),
+                id = "pid",
+                start = as.Date('2014-01-01'), 
+                end = as.Date('2014-12-31'), 
+                reverse = T
+)
+
+summary(rev_1)
+
+predict(rev_1, distrx = "rxdate", quantile = 0.8)
+```
+
+
+```{r fit_3_model}
+# 3) multiple random index date (m =5)
+rev_ran_5 <- ranwtdttt(data = df,
+                       rxdate ~ dlnorm(logitp, mu, lnsigma),
+                       id = "pid",
+                       start = as.Date('2014-01-01'),
+                       end = as.Date('2014-12-31'),
+                       reverse = T,
+                       nsamp = 5, 
+                       robust = T
+)
+
+summary(rev_ran_5)
+
+predict(rev_ran_5, distrx = "rxdate", quantile = 0.8)
+```
+
+
+```{r fit_4_model}
+# 4) multiple random index date (m =50)
+rev_ran_50 <- ranwtdttt(data = df,
+                        rxdate ~ dlnorm(logitp, mu, lnsigma),
+                        id = "pid",
+                        start = as.Date('2014-01-01'),
+                        end = as.Date('2014-12-31'),
+                        reverse = T,
+                        nsamp = 50, 
+                        robust = T
+)
+
+summary(rev_ran_50)
+
+predict(rev_ran_50, distrx = "rxdate", quantile = 0.8)
+```
+
+
+```{r fit_5_model, warning=FALSE}
+# 5) saturated sampling
+rev_sat_e <- satwtdttt(data = df,
+                       rxdate ~ dlnorm(logitp, mu, lnsigma),
+                       id = "pid",
+                       start = as.Date('2014-01-01'), 
+                       end = as.Date('2014-12-31'),
+                       robust = T,
+                       reverse = F
+)
+
+
+summary(rev_sat_e)
+
+predict(rev_sat_e, distrx = "rxdate", quantile = 0.8)
+```
+
