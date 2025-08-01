@@ -292,3 +292,6 @@ results_a <- rbind(results_p, results_i, results_s)
 
 results_sel <- results_a %>% group_by(id) %>% slice_min(disp_time)
 hist(results_sel$disp_time, breaks = 100)
+
+# save(results_a, file = file.path("extdata", "results_a.rda"))
+
