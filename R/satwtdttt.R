@@ -24,7 +24,7 @@
 satwtdttt <- function(data, form, parameters=NULL, start=NA, end=NA, reverse=F, id=NA,
                       subset=NULL, robust=T, na.action=na.omit, init=NULL, ...) {
   
-  browser()
+  # browser()
   
   
   if(is.null(data) || (nrow(data)<1)) {
@@ -81,74 +81,49 @@ satwtdttt <- function(data, form, parameters=NULL, start=NA, end=NA, reverse=F, 
   # keep only unique dispensing times
   data <- data[, .SD[!duplicated(obs.name)], by = id]
   
-  # 1) between first dispensation and last dispensation
-  
   # add an artificial last observation to include index dates after the last observed dispensation until the end of the window
-  data_max <- data[!duplicated(id)]
+  data_max <- data[!duplicated(get(id)),]
   data_max <- data_max[,obs_max := end]
   
   data_max <- data_max[,(obs.name):=NULL]
   setnames(data_max, "obs_max", obs.name)
   
-  data <- rbind(data, data_max)
+  data_m <- rbind(data, data_max)
   
   # order by dispensing time
-  data <- data[order(id,get(obs.name))]
+  data_m <- data_m[order(get(id), get(obs.name)), ]
   
-  data_post <- data[get(obs.name) >= start & get(obs.name) <= end, .SD]
+  data_m <- data_m[, tag := fifelse(get(obs.name) < start, 0L, 1L)]
+  
+  data_m <- data_m[, .SD[(get(obs.name)<=end) & (tag==1 | (tag==0 & get(obs.name)==max(get(obs.name)[tag==0] ))) ], by = id]
   
   # compute time from consecutive dispensations
-  data_post <- data_post[, time_to_next := shift(get(obs.name), type = "lead") - get(obs.name) , by = id]
-  data_post <- data_post[, time_to_next := as.numeric(time_to_next)]
+  # data_m <- data_m[, dist_last := shift(get(obs.name), type = "lead") - get(obs.name) , by = id]
+  data_m <- data_m[, dist_last := get(obs.name) - shift(get(obs.name), type = "lag") , by = id]
+  # data_m <- data_m[, time_to_next := as.numeric(time_to_next)]
+  data_m <- data_m[, dist_last := as.numeric(dist_last)]
   
   # remove the last row as it doesn't have time to the next one
-  data_post <- data_post[!is.na(time_to_next)]
+  data_m <- data_m[!is.na(dist_last)]
   
-  # expand obs.name time_to_next times
-  data_e_post <- data_post[rep(1:.N, times = time_to_next)]
+  # expand obs.name dist_last times
+  data_e <- data_m[rep(1:.N, times = dist_last)]
   
   # compute time since last dispensation, considering all the possible index dates until the next dispensation
   bycols <- c(id, obs.name)
-  data_e_post <- data_e_post[, days_since_last := (seq(.N)-1)+0.5, by = bycols]
+  data_e <- data_e[, days_since_last := (seq(.N)-1)+0.5, by = bycols]
   
-  first_disp <- data[get(obs.name) >= start & get(obs.name) <= end, .SD[which.min(get(obs.name))], by = id]
+  # browser()
   
-  # 2) before first dispensation
+  # remove index dates before start
+  data_e <- data_e[(get(obs.name) - dist_last + days_since_last) >= as.Date('2014-01-01') ,]
+  # if dist_last := shift(get(obs.name), type = "lead") - get(obs.name)
+  # data_e <- data_e[(get(obs.name) + days_since_last) >= as.Date('2014-01-01') ,]
   
-  # data_pre_first_disp <- data %>% filter(get(obs.name) < first_disp & get(obs.name) >= first_disp-(end-start)) %>% slice_max(get(obs.name))
+  # remove days since last larger than the sampling window
+  data_e <- data_e[days_since_last < delta ,]
   
-  data <- first_disp[, .(id, first_disp = disp_time)][data, on = "id"]
-  data_pre_first_disp <- data[get(obs.name) < first_disp & get(obs.name) >= first_disp-(end-start), .SD[which.max(get(obs.name))], by = id]
   
-  # add first dispensing (within start-end window)
-  data_pre_first_disp <- rbind(data_pre_first_disp[,.SD, .SDcols = setdiff(names(data_pre_first_disp), "first_disp")], first_disp)
-  
-  # compute time from consecutive dispensations
-  data_pre_first_disp <- data_pre_first_disp[, time_to_next := shift(get(obs.name), type = "lead") - get(obs.name) , by = id]
-  data_pre_first_disp <- data_pre_first_disp[, time_to_next := as.numeric(time_to_next)]
-  
-  # remove the last row as it doesn't have time to the next one
-  data_pre_first_disp <- data_pre_first_disp[!is.na(time_to_next)]
-  
-  # expand obs.name time_to_next times
-  data_e_pre_first_disp <- data_pre_first_disp[rep(1:.N, times = time_to_next)]
-  
-  # compute time since last dispensation, considering all the possible index dates until the next dispensation
-  bycols <- c(id, obs.name)
-  data_e_pre_first_disp <- data_e_pre_first_disp[, days_since_last := (seq(.N)-1)+0.5, by = bycols]
-  
-  # max_disp_last_year <- as.numeric(data %>% filter(get(obs.name) < start & get(obs.name) >= start-365.25) %>% summarise(last_disp = max(get(obs.name))))
-  
-  max_disp_last_year <- data[get(obs.name) < first_disp & get(obs.name) >= first_disp-365.25, .SD[which.max(get(obs.name))], by = id]
-  
-  max_disp_last_year <- max_disp_last_year[, min_diff := start - disp_time]
-  
-  data_e_pre_first_disp <- max_disp_last_year[, .(id, min_diff)][data_e_pre_first_disp, on = "id"]
-  
-  data_e_pre_first_disp <- data_e_pre_first_disp[days_since_last > min_diff, .SD]
-  
-  # 3) bind time window before and after the first dispensation within start-end window ----
-  data_e <- rbind(data_e_pre_first_disp[,.SD, .SDcols = setdiff(names(data_e_pre_first_disp), "min_diff")], data_e_post)
   
   ############
   
