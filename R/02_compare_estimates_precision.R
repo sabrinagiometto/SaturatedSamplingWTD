@@ -1,4 +1,5 @@
 library(wtdr)
+library(data.table)
 source("R/satwtdttt.R")
 
 # Fit different models to compare estimates precision ----
@@ -91,7 +92,7 @@ load(file.path("extdata", "results_a.rda"))
 ## 1) single index date ----
 fit1 <- wtdttt(data = results_a,
                disp_time ~ dlnorm(logitp, mu, lnsigma),
-               id = "id",
+               id = "pid",
                start = 0, 
                end = 365, 
                reverse = T
@@ -104,7 +105,7 @@ wtdr::predict(fit1, quantile = 0.8)
 ## 2) multiple random index date (m = 5) ----
 fit2 <- ranwtdttt(data = results_a,
                    disp_time ~ dlnorm(logitp, mu, lnsigma),
-                   id = "id",
+                   id = "pid",
                    start = 0,
                    end = 365,
                    reverse = T,
@@ -119,10 +120,10 @@ predict(fit2, quantile = 0.8)
 ## 3) satured sampling ----
 fit3 <- satwtdttt(data = results_a,
                   disp_time ~ dlnorm(logitp, mu, lnsigma),
-                  id = "id",
+                  id = "pid",
                   start = 365, 
                   end = 730,
-                  reverse = T, # con reverse = F funziona
+                  reverse = F, # con reverse = F funziona
                   robust = T
 )
 
