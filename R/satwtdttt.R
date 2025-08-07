@@ -75,7 +75,7 @@ satwtdttt <- function(data, form, parameters=NULL, start=NA, end=NA, reverse=F, 
     stop(paste0("'", id, "'", "is not in data"))
   }
   
-  
+
   # implementing saturated sampling
   
   # keep only unique dispensing times
@@ -116,7 +116,20 @@ satwtdttt <- function(data, form, parameters=NULL, start=NA, end=NA, reverse=F, 
   # browser()
   
   # remove index dates before start
-  data_e <- data_e[(get(obs.name) - dist_last + days_since_last) >= as.Date('2014-01-01') ,]
+  # 
+  # if(is(data[[obs.name]], "Date")) {
+  #   
+  #   data_e <- data_e[(get(obs.name) - dist_last + days_since_last) >= as.Date('2014-01-01') ,]
+  #   
+  # } else if(is(data[[obs.name]], "numeric")) {
+  # 
+  #   data_e <- data_e[(get(obs.name) - dist_last + days_since_last) >= 0 ,]
+  #   
+  # }
+  
+  data_e <- data_e[(get(obs.name) - dist_last + days_since_last) >= start ,]
+  
+  
   # if dist_last := shift(get(obs.name), type = "lead") - get(obs.name)
   # data_e <- data_e[(get(obs.name) + days_since_last) >= as.Date('2014-01-01') ,]
   
