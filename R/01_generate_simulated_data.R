@@ -175,9 +175,12 @@ dt_e <- rbind(dt_e_pre_first_disp, dt_e_post)
 # Generate data from a lognormal instead of a uniform distribution ----
 
 ## WTD prevalent component ----
+
+duration_generated_Rx_lengths <- 60
+
 set.seed(123)
 
-s <- qnorm(runif(1000))*0.5 + (4+(0.5^2))
+s <- qnorm(runif(1000))*0.5 + (log(duration_generated_Rx_lengths)+(0.5^2))
 V <- exp(s)
 u <- runif(1000, 0, V)
 y <- u
@@ -191,7 +194,7 @@ hist(y, breaks = 100)
 
 while(min(time) <= 730.5){
   
-  x <- exp(qnorm(runif(1000))*0.5 + 4)
+  x <- exp(qnorm(runif(1000))*0.5 + log(duration_generated_Rx_lengths))
   tmp <- data.frame(cbind(tmp, x))
   time <- rowSums(tmp[1:i])
   results_p <- data.frame(cbind(results_p, time))
@@ -203,12 +206,12 @@ while(min(time) <= 730.5){
 # remove time values larger than 365, reshape,
 results_p <- results_p %>%
   mutate(across(everything(.), ~ ifelse(. >= 730.5, NA, .))) %>%
-  mutate(id = sample(1:dim(results_p)[1], 1000, replace = F)) %>%
-  pivot_longer(cols = -c(id), names_to = "count", values_to = "disp_time") %>%
+  mutate(pid = sample(1:dim(results_p)[1], 1000, replace = F)) %>%
+  pivot_longer(cols = -c(pid), names_to = "count", values_to = "disp_time") %>%
   drop_na() %>%
   select(!count)
 
-results_sel <- results_p %>% group_by(id) %>% slice_min(disp_time)
+results_sel <- results_p %>% group_by(pid) %>% slice_min(disp_time)
 hist(results_sel$disp_time, breaks = 100)
 
 ## WTD incident component (needed in case the ordinary version of model is used, reverse == F) ----
@@ -224,7 +227,7 @@ time <- 0
 
 while(min(time) <= 730.5){
   
-  x <- exp(qnorm(runif(1000))*0.5 + 4)
+  x <- exp(qnorm(runif(1000))*0.5 + log(duration_generated_Rx_lengths))
   tmp <- data.frame(cbind(tmp, x))
   time <- rowSums(tmp[1:i])
   results_i <- data.frame(cbind(results_i, time))
@@ -236,12 +239,12 @@ while(min(time) <= 730.5){
 # remove time values larger than 365, reshape,
 results_i <- results_i %>%
   mutate(across(everything(.), ~ ifelse(. >= 730.5, NA, .))) %>%
-  mutate(id = sample(dim(results_p)[1]+1:dim(results_p)[1]+1+dim(results_i)[1], 1000, replace = F)) %>%
-  pivot_longer(cols = -c(id), names_to = "count", values_to = "disp_time") %>%
+  mutate(pid = sample(dim(results_p)[1]+1:dim(results_p)[1]+1+dim(results_i)[1], 1000, replace = F)) %>%
+  pivot_longer(cols = -c(pid), names_to = "count", values_to = "disp_time") %>%
   drop_na() %>%
   select(!count)
 
-results_sel <- results_i %>% group_by(id) %>% slice_min(disp_time)
+results_sel <- results_i %>% group_by(pid) %>% slice_min(disp_time)
 hist(results_sel$disp_time, breaks = 100)
 
 ## WTD stopping component (needed in case the reverse version of model is used, reverse == T)----
@@ -258,7 +261,7 @@ time <- 0
 
 while(max(time) >= 0){
   
-  x <- exp(qnorm(runif(1000))*0.5 + 4)
+  x <- exp(qnorm(runif(1000))*0.5 + log(duration_generated_Rx_lengths))
   tmp <- data.frame(cbind(tmp, x))
   
   time <- apply(tmp, 1, function(tmp) {
@@ -278,19 +281,19 @@ results_s <- results_s %>% rename(first = results_s)
 
 results_s <- results_s %>%
   mutate(across(everything(.), ~ ifelse(. <= 0, NA, .))) %>%
-  mutate(id = base::sample((nrow(results_p)+1):(nrow(results_p)+1+nrow(results_s)), nrow(results_s), replace = F)) %>%
-  pivot_longer(cols = -c(id), names_to = "count", values_to = "disp_time") %>%
+  mutate(pid = base::sample((nrow(results_p)+1):(nrow(results_p)+1+nrow(results_s)), nrow(results_s), replace = F)) %>%
+  pivot_longer(cols = -c(pid), names_to = "count", values_to = "disp_time") %>%
   drop_na() %>%
   select(!count)
 
-results_sel <- results_s %>% group_by(id) %>% slice_max(disp_time)
+results_sel <- results_s %>% group_by(pid) %>% slice_max(disp_time)
 hist(results_sel$disp_time, breaks = 100)
 
 
 # bind prevalent, incident users and stoppers
 results_a <- rbind(results_p, results_i, results_s)
 
-results_sel <- results_a %>% group_by(id) %>% slice_min(disp_time)
+results_sel <- results_a %>% group_by(pid) %>% slice_min(disp_time)
 hist(results_sel$disp_time, breaks = 100)
 
 # save(results_a, file = file.path("extdata", "results_a.rda"))
