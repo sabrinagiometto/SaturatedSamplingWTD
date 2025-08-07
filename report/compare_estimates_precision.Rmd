@@ -1,7 +1,7 @@
 ---
 title: Comparison of the precision of predicted dispensation length when using single or multiple index dates and saturated sampling
 author: "SG"
-date: "2025-07-31"
+date: "2025-08-07"
 output: pdf_document
 ---
 
@@ -799,12 +799,12 @@ satwtdttt <- function(data, form, parameters=NULL, start=NA, end=NA, reverse=F, 
   # browser()
   
   # remove index dates before start
-  data_e <- data_e[(get(obs.name) - dist_last + days_since_last) >= as.Date('2014-01-01') ,]
+  data_e <- data_e[(get(obs.name) - dist_last + days_since_last) >= start ,]
   # if dist_last := shift(get(obs.name), type = "lead") - get(obs.name)
   # data_e <- data_e[(get(obs.name) + days_since_last) >= as.Date('2014-01-01') ,]
   
   # remove days since last larger than the sampling window
-  data_e <- data_e[days_since_last < 365.25 ,]
+  data_e <- data_e[days_since_last < delta ,]
   
   
   
@@ -999,9 +999,144 @@ sand_vcov <- function(fit) {
   (nid/(nid-1)) * (bread %*% meat %*% bread)
 }
 
+ranwtdttt <- function(data, form, parameters=NULL, start=NA, end=NA, reverse=F, id=NA,
+                      nsamp=1, subset=NULL, robust=T, na.action=na.omit, init=NULL, control=NULL, ...) {
+
+  if(is.null(data) || (nrow(data)<1)) {
+    stop("data must be non-empty")
+  }
+
+  if(!inherits(form, "formula") || attr(terms(form), "response")==0) {
+    stop("obstime variable must be specified in model formula")
+  }
+
+  data <- as.data.table(data)
+
+  if(!is.null(substitute(subset))) {
+
+    rows <- enquo(subset)
+    rows_val <- eval_tidy(rows, data)
+    data <- data[rows_val ,]
+
+    if(nrow(data)<1) {
+      stop("data must be non-empty")
+    }
+
+  }
+
+
+  # 14/04/25
+  obs.name <- all.vars(form)[1]
+  covar.names <- unique(unlist(lapply(parameters, function(x) all.vars(x)[-1])))
+
+  if(!(obs.name %in% names(data))) {
+    stop(paste0("'", obs.name, "'", "is not in data"))
+  }
+
+  data <- na.action(data, cols = c(obs.name, covar.names))
+
+  ##
+
+  # creation of shifted dates
+
+  # if(!is(data[[obs.name]], "Date") || !is(start, "Date") || !is(end, "Date"))
+  #   stop(paste0("variables start, end and '", obs.name, "' must be all of class Date"))
+
+  delta <- as.numeric(end - start)
+
+  if(is.null(id) || length(id)!=1 || is.na(id)) {
+    stop("The id variable must be provided")
+  }
+
+  if(!(id %in% names(data))) {
+    stop(paste0("'", id, "'", "is not in data"))
+  }
+
+  # define 'id' as key so it can be used to assign random offsets
+  kc <- c(id, obs.name); setkeyv(data, kc) # XXXX consider using indexing
+
+  obs.ind <- which(colnames(data)==obs.name)
+  .id <- c(id)
+
+  off <- data.table(id=unique(data[[id]]), key=c("id"))
+
+  f <- function() {
+
+    # all obs with the same id should get the same random offset
+    off[, indda := start + floor(runif(n=nrow(off), max=delta+1))]
+
+    if (!reverse) {
+
+      data[off, indda := i.indda][data[[obs.name]] >= indda & data[[obs.name]] <= (indda + delta), .SD[1L], by=.id][, rxshift := .obs - (indda-start), env=list(.obs=obs.name)]
+
+    } else {
+
+      data[off, indda := i.indda][data[[obs.name]] <= indda & data[[obs.name]] >= (indda - delta), .SD[.N], by=.id][, rxshift := .obs + (end - indda), env=list(.obs=obs.name)]
+
+    }
+
+  }
+
+  # bind multiple copies of dataframes
+  tmp <- do.call(rbind, replicate(nsamp, f(), simplify = FALSE))
+
+  # XXXX do formula rewrite like in wtdttt() ?
+  disttmp <- attr(terms(form, specials=c("dlnorm", "dweib", "dexp")), "specials")
+
+  dist <- if(isTRUE(disttmp$dlnorm==2)) "lnorm" # need isTRUE() as value can be NULL
+          else if(isTRUE(disttmp$dweib==2)) "weib"
+          else if(isTRUE(disttmp$dexp==2)) "exp"
+          else stop("model must use one of dlnorm, dweib or dexp")
+
+  if(dist == "lnorm") {
+
+     newform <- rxshift ~ dlnorm(logitp, mu, lnsigma)
+
+  } else if (dist == "weib") {
+
+     newform <- rxshift ~ dweib(logitp, lnalpha, lnbeta)
+
+  } else if (dist == "exp") {
+
+     newform <- rxshift ~ dexp(logitp, lnbeta)
+
+  }
+
+  if(nrow(tmp)==0)
+    stop("All dates are out of the window defined by start and end")
+
+
+  # XXXX shouldn't apply subset both here and above
+  # note, pass 'id' to wtdttt() but set preprocess=F
+  # as when nsamp > 1 *all* copies of data should be used
+
+  out <- wtdttt(form = newform, parameters = parameters,
+                start = start, end = end, reverse = reverse, id = id,
+                preprocess = F, init = init, data = tmp)
+
+  if (!robust) {
+
+    out <- out
+
+  } else {
+
+    vcov_s <- sand_vcov(out)
+    out@vcov <- vcov_s
+
+  }
+
+
+  return(out)
+
+}
+
 ```
 
+\newpage
+
 ```{r load_data, results = "hide"}
+# Analysis on synthetic data (extraction from JH)
+
 set.seed(345)
 
 df <- read.csv(file.path("..", "extdata", "df_sat_ex.csv"))
@@ -1100,3 +1235,99 @@ summary(rev_sat_e)
 predict(rev_sat_e, distrx = "rxdate", quantile = 0.8)
 ```
 
+\newpage
+
+```{r load_data_simulated, results = "hide"}
+# Analysis on simulated data
+
+set.seed(345)
+
+load(file.path("..", "extdata", "results_a.rda"))
+
+df <- as.data.table(results_a)
+
+```
+
+```{r fit_1_model_simulated}
+# 1) single index date - forward
+forw_1 <- wtdttt(data = df,
+                 disp_time ~ dlnorm(logitp, mu, lnsigma),
+                 id = "pid",
+                 start = 365.25, 
+                 end = 730.5, 
+                 reverse = F
+)
+
+summary(forw_1)
+
+predict(forw_1, distrx = "disp_time", quantile = 0.8)
+```
+
+```{r fit_2_model_simulated}
+# 2) single index date - reverse
+rev_1 <- wtdttt(data = df,
+                disp_time ~ dlnorm(logitp, mu, lnsigma),
+                id = "pid",
+                start = 365.25, 
+                end = 730.5, 
+                reverse = T
+)
+
+summary(rev_1)
+
+predict(rev_1, distrx = "disp_time", quantile = 0.8)
+```
+
+
+```{r fit_3_model_simulated}
+# 3) multiple random index date (m =5)
+rev_ran_5 <- ranwtdttt(data = df,
+                       disp_time ~ dlnorm(logitp, mu, lnsigma),
+                       id = "pid",
+                       start = 365.25,
+                       end = 730.5,
+                       reverse = T,
+                       nsamp = 5, 
+                       robust = T
+)
+
+summary(rev_ran_5)
+
+predict(rev_ran_5, distrx = "disp_time", quantile = 0.8)
+```
+
+
+```{r fit_4_model_simulated}
+# 4) multiple random index date (m =50)
+rev_ran_50 <- ranwtdttt(data = df,
+                        disp_time ~ dlnorm(logitp, mu, lnsigma),
+                        id = "pid",
+                        start = 365.25,
+                        end = 730.5,
+                        reverse = T,
+                        nsamp = 50, 
+                        robust = T
+)
+
+summary(rev_ran_50)
+
+predict(rev_ran_50, distrx = "disp_time", quantile = 0.8)
+```
+
+
+```{r fit_5_model_simulated, warning=FALSE}
+# 5) saturated sampling
+rev_sat_e <- satwtdttt(data = df,
+                       disp_time ~ dlnorm(logitp, mu, lnsigma),
+                       id = "pid",
+                       start = 365.25, 
+                       end = 730.5,
+                       robust = T,
+                       reverse = F
+)
+
+
+summary(rev_sat_e)
+
+predict(rev_sat_e, distrx = "disp_time", quantile = 0.8)
+```
