@@ -162,9 +162,8 @@ for (replication in 1:m) {
   
   
   # bind prevalent, incident users and stoppers
-  # df <- rbind(results_p, results_i, results_s)
-  df <- rbind(results_p, results_i)
-  # 
+  df <- rbind(results_p, results_i, results_s)
+  
   # results_sel <- df %>% group_by(pid) %>% slice_min(disp_time)
   # hist(results_sel$disp_time, breaks = 100)
   
