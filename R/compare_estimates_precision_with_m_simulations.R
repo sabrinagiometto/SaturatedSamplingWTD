@@ -9,11 +9,13 @@ library(officer)
 
 source("R/satwtdttt.R")
 
-# ! remove if statement in ranwtdttt code when using numerical start and end
-
+# set seed to allow reproducibility
 set.seed(123)
 
+# set the number of replications
 m <- 100
+
+# initialize empty datasets
 
 # 1) reverse, fixed
 
@@ -43,6 +45,7 @@ res_rev_saturated <- data.frame(replication = numeric(),
                                 logitp_se = numeric(), mu_se = numeric(), lnsigma_se = numeric(),
                                 disp_length_est = numeric(), disp_length_se = numeric())
 
+# data generation and analysis conduction according to the 4 analytic methods
 
 system.time({
 
@@ -53,8 +56,6 @@ for (replication in 1:m) {
   N <- 1000
   
   log_sd <- 0.50
-  
-  # set.seed(123)
   
   s <- qnorm(runif(N*0.8))*log_sd + (log(duration_generated_Rx_lengths)+(log_sd^2))
   V <- exp(s)
@@ -353,7 +354,7 @@ for (i in data) {
   
 }
 
-# bias 
+# relative bias 
 
 data <- list(res_rev_fixed, res_rev_random5, res_rev_random50, res_rev_saturated)
 
@@ -670,7 +671,7 @@ ggplot(df_s, aes(x = Model_variant, y = Estimate, group = 1)) +
   )
 
 a <- grid.grab()
-# ggsave("report/Figure_2.png", width = 3000, height = 1500, dpi = 300, units = "px")
+
 
 df_s <- df %>% filter(Parameter=="mu")
 
